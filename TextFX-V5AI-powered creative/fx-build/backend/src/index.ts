@@ -117,9 +117,9 @@ const DENY_RE = [
   /javascript:/i,
 ]
 
-function sanitize(s: string): { ok: boolean; reason?: string } {
+function sanitize(s: string, maxLen = 8_000): { ok: boolean; reason?: string } {
   if (!s || typeof s !== 'string') return { ok: false, reason: 'empty input' }
-  if (s.length > 8_000)            return { ok: false, reason: 'input too long' }
+  if (s.length > maxLen)           return { ok: false, reason: 'input too long' }
   for (const re of DENY_RE) {
     if (re.test(s)) return { ok: false, reason: 'sanitizer: injection pattern detected' }
   }
@@ -128,11 +128,33 @@ function sanitize(s: string): { ok: boolean; reason?: string } {
 
 const POLICY_BLOCK = ['bomb', 'weapon', 'malware', 'exploit', 'ransomware', 'ddos']
 function policyCheck(s: string): { allowed: boolean; reason?: string } {
-  const lower = s.toLowerCase()
+  const lower = String(s ?? '').toLowerCase()
   for (const w of POLICY_BLOCK) {
     if (lower.includes(w)) return { allowed: false, reason: `blocked term: ${w}` }
   }
   return { allowed: true }
+}
+
+// ─── Payload normaliser ─────────────────────────
+const MAX_STAGE_PAYLOAD = 50_000
+function payloadText(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'string') return v.trim()
+  try { return JSON.stringify(v) } catch { return '' }
+}
+function validateStagePayload(v: unknown, label: string): { ok: true; value: unknown } | { ok: false; status: number; error: string } {
+  let value: unknown = v
+  if (typeof value === 'string') {
+    const t = value.trim()
+    if (t.startsWith('{')) { try { value = JSON.parse(t) } catch { /* keep as plain string */ } }
+  }
+  const text = payloadText(value)
+  if (!text || text === '{}' || text === 'null') return { ok: false, status: 400, error: `${label} required` }
+  const san = sanitize(text, MAX_STAGE_PAYLOAD)
+  if (!san.ok) return { ok: false, status: 400, error: san.reason ?? 'invalid input' }
+  const pol = policyCheck(text)
+  if (!pol.allowed) return { ok: false, status: 403, error: `Policy blocked: ${pol.reason}` }
+  return { ok: true, value }
 }
 
 // ─── Timeout wrapper ──────────────────────────────────────────────────────────
@@ -295,25 +317,19 @@ app.post('/api/insight', async (req, res) => {
 
 app.post('/api/concept', async (req, res) => {
   const { insight, archetype, brandVoice, language } = req.body || {}
-  if (!insight) return void res.status(400).json({ error: 'insight required' })
-  const san = sanitize(insight)
-  if (!san.ok) return void res.status(400).json({ error: san.reason })
-  const pol = policyCheck(insight)
-  if (!pol.allowed) return void res.status(403).json({ error: `Policy blocked: ${pol.reason}` })
+  const v = validateStagePayload(insight, 'insight')
+  if (!v.ok) return void res.status(v.status).json({ error: v.error })
   try {
-    res.json(await withTimeout(mapConcept(insight, buildCtx({ archetype, brandVoice, language })), 30_000, 'concept'))
+    res.json(await withTimeout(mapConcept(v.value, buildCtx({ archetype, brandVoice, language })), 30_000, 'concept'))
   } catch (e: unknown) { res.status(500).json({ error: String(e) }) }
 })
 
 app.post('/api/script', async (req, res) => {
   const { concept, archetype, brandVoice, language } = req.body || {}
-  if (!concept) return void res.status(400).json({ error: 'concept required' })
-  const san = sanitize(concept)
-  if (!san.ok) return void res.status(400).json({ error: san.reason })
-  const pol = policyCheck(concept)
-  if (!pol.allowed) return void res.status(403).json({ error: `Policy blocked: ${pol.reason}` })
+  const v = validateStagePayload(concept, 'concept')
+  if (!v.ok) return void res.status(v.status).json({ error: v.error })
   try {
-    res.json(await withTimeout(writeScript(concept, buildCtx({ archetype, brandVoice, language })), 30_000, 'script'))
+    res.json(await withTimeout(writeScript(v.value, buildCtx({ archetype, brandVoice, language })), 30_000, 'script'))
   } catch (e: unknown) { res.status(500).json({ error: String(e) }) }
 })
 

@@ -70,6 +70,40 @@ interface ScriptData {
   script:string; beats:string[]; cameraLanguage:string
   narrativeStrategy:string; emotionalTurning:string
 }
+
+function scriptValueToText(value: unknown): string {
+  if (typeof value === 'string') return value
+  if (value == null) return ''
+  try { return JSON.stringify(value, null, 2) } catch { return String(value) }
+}
+
+function renderScriptValue(value: unknown): ReactNode {
+  if (value == null || typeof value === 'boolean') return null
+  if (typeof value === 'string' || typeof value === 'number') return value
+  if (Array.isArray(value)) {
+    return (
+      <ol className="technique-list">
+        {value.map((item, index) => <li key={index}>{renderScriptValue(item)}</li>)}
+      </ol>
+    )
+  }
+  if (typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    const sceneFields = ['time', 'scene', 'action', 'visuals', 'audio']
+    if (sceneFields.some(field => field in record)) {
+      return (
+        <div className="script-scene">
+          {sceneFields.filter(field => field in record).map(field => (
+            <p key={field}><strong>{field}</strong>: {renderScriptValue(record[field])}</p>
+          ))}
+        </div>
+      )
+    }
+    return <pre>{scriptValueToText(value)}</pre>
+  }
+  return String(value)
+}
+
 type Iteration = {
   timestamp:number; brief:string; archetype:string
   brandVoice:{ formalLevel:number; metaphorLevel:number; intensity:number }
@@ -346,7 +380,7 @@ function App() {
 
   const doCopy = async () => {
     if (!script) return
-    try { await navigator.clipboard.writeText(script.script); setCopied(true); setTimeout(() => setCopied(false), 1600) }
+    try { await navigator.clipboard.writeText(scriptValueToText(script.script)); setCopied(true); setTimeout(() => setCopied(false), 1600) }
     catch { /* clipboard unavailable */ }
   }
 
@@ -380,7 +414,7 @@ function App() {
     doc.setFontSize(10); doc.text(`Brief: ${brief}`, 10, 28)
     if (insight) doc.text(`Insight: ${insight.mainInsight}`, 10, 40, { maxWidth:190 })
     if (concept) { doc.text(`Concept: ${concept.title} — ${concept.tagline}`, 10,55); doc.text(concept.coreIdea, 10,68,{maxWidth:190}) }
-    if (script)  doc.text(script.script, 10, 90, { maxWidth:190 })
+    if (script)  doc.text(scriptValueToText(script.script), 10, 90, { maxWidth:190 })
     doc.save('textfx-masterpiece.pdf')
   }
 
@@ -613,21 +647,21 @@ function App() {
               <h2 className="stage-title" id="stage-05-title">{t.scriptTitle}</h2>
             </div>
             <div className="pane">
-              <pre className="script-block" dir="auto" aria-label={t.scriptTitle}>{script.script}</pre>
+              <div className="script-block" dir="auto" aria-label={t.scriptTitle}>{renderScriptValue(script.script)}</div>
               <div className="two-col" style={{marginTop:'24px'}}>
                 <div className="technique">
                   <h3 className="technique-label">{t.emotionalBeats}</h3>
-                  <ul className="technique-list" dir="auto">{(script.beats||[]).map((b,i) => <li key={i}>{b}</li>)}</ul>
+                  <div dir="auto">{renderScriptValue(script.beats)}</div>
                 </div>
                 <div className="technique">
                   <h3 className="technique-label">{t.cameraLanguage}</h3>
-                  <p className="technique-text" dir="auto">{script.cameraLanguage}</p>
+                  <div className="technique-text" dir="auto">{renderScriptValue(script.cameraLanguage)}</div>
                 </div>
               </div>
               {script.narrativeStrategy && (
                 <div className="technique" style={{marginTop:'16px'}}>
                   <h3 className="technique-label">{t.narrative}</h3>
-                  <p className="technique-text" dir="auto">{script.narrativeStrategy}</p>
+                  <div className="technique-text" dir="auto">{renderScriptValue(script.narrativeStrategy)}</div>
                 </div>
               )}
               <div className="btn-row btn-col">
