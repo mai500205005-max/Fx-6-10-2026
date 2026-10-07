@@ -1,10 +1,10 @@
 /**
- * TextFX v5 — LLM Gateway (Gemini-primary)
+ * TextFX v5 — LLM Gateway (Gemini primary + fallback providers)
  * ─────────────────────────────────────────────────────
  * Single entrypoint for ALL AI provider calls.
  *
  * Features:
- *  - Singleton Gemini, OpenRouter, OpenAI + VertexAI clients (initialized once, reused)
+ *  - Singleton Gemini + OpenRouter + OpenAI + VertexAI clients (initialized once, reused)
  *  - Priority provider list: Gemini → OpenRouter → OpenAI → VertexAI → Mock
  *  - Automatic fallback on provider failure
  *  - Retry with exponential backoff (up to 2 retries per provider)
@@ -22,8 +22,8 @@
 
 import crypto  from 'crypto'
 import OpenAI  from 'openai'
-import { VertexAI } from '@google-cloud/vertexai'
 import { GoogleGenAI } from '@google/genai'
+import { VertexAI } from '@google-cloud/vertexai'
 
 // ─── Unified types ────────────────────────────────────────────────────────────
 
@@ -103,6 +103,16 @@ function isHealthy(name: string): boolean {
 
 // ─── Singleton clients ────────────────────────────────────────────────────────
 
+let _geminiClient: GoogleGenAI | null = null
+function getGeminiClient(): GoogleGenAI {
+  if (!_geminiClient) {
+    const apiKey = process.env.GEMINI_API_KEY
+    if (!apiKey) throw new Error('GEMINI_API_KEY environment variable is required')
+    _geminiClient = new GoogleGenAI({ apiKey })
+  }
+  return _geminiClient
+}
+
 let _openaiClient: OpenAI | null = null
 function getOpenAIClient(): OpenAI {
   if (!_openaiClient) {
@@ -111,25 +121,12 @@ function getOpenAIClient(): OpenAI {
   return _openaiClient
 }
 
-let _geminiClient: GoogleGenAI | null = null
-function getGeminiClient(): GoogleGenAI {
-  if (!_geminiClient) {
-    const apiKey = process.env.GEMINI_API_KEY
-    if (!apiKey) throw new Error('GEMINI_API_KEY is not configured')
-    _geminiClient = new GoogleGenAI({
-      apiKey,
-      httpOptions: { retryOptions: { attempts: 1 }, timeout: 8_000 },
-    })
-  }
-  return _geminiClient
-}
-
 let _openrouterClient: OpenAI | null = null
 function getOpenRouterClient(): OpenAI {
   if (!_openrouterClient) {
     _openrouterClient = new OpenAI({
       apiKey: process.env.OPENROUTER_API_KEY!,
-      baseURL: 'https://openrouter.ai/api/v1',
+      baseURL: 'https://openrouter.io/api/v1',
       defaultHeaders: {
         'X-Title': 'TextFX',
       },
@@ -285,13 +282,44 @@ function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
   })
 }
 
-function isRetryableProviderError(error: unknown): boolean {
-  if (typeof error !== 'object' || error === null || !('status' in error)) return true
-  const status = error.status
-  return typeof status !== 'number' || status === 408 || status >= 500
-}
-
 // ─── Individual provider calls (no retry logic here) ─────────────────────────
+
+async function callGemini(prompt: string, systemPrompt: string): Promise<GatewayResponse> {
+  const client    = getGeminiClient()
+  const model     = process.env.GEMINI_MODEL || 'gemini-3.8-flash'
+  const temp      = parseFloat(process.env.GEMINI_TEMPERATURE || '0.8')
+  const maxTokens = parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS || '2000', 10)
+  const t0        = Date.now()
+
+  const resp = await client.models.generateContent({
+    model,
+    contents: prompt,
+    config: {
+      systemInstruction: systemPrompt,
+      temperature: temp,
+      maxOutputTokens: maxTokens,
+      candidateCount: 1,
+    },
+  })
+
+  const text = resp.text ?? ''
+  const promptTokens = resp.usageMetadata?.promptTokenCount ?? estimateTokens(systemPrompt + prompt)
+  const completionTokens = resp.usageMetadata?.candidatesTokenCount ?? estimateTokens(text)
+  const totalTokens = resp.usageMetadata?.totalTokenCount ?? (promptTokens + completionTokens)
+  const costUsd = estimateCost(model, promptTokens, completionTokens)
+
+  return {
+    text,
+    provider: 'Gemini',
+    model,
+    latencyMs: Date.now() - t0,
+    usage: { promptTokens, completionTokens, totalTokens },
+    cacheHit: false,
+    retries: 0,
+    fallbackUsed: false,
+    estimatedCostUsd: costUsd,
+  }
+}
 
 async function callOpenAI(prompt: string, systemPrompt: string): Promise<GatewayResponse> {
   const client    = getOpenAIClient()
@@ -328,43 +356,9 @@ async function callOpenAI(prompt: string, systemPrompt: string): Promise<Gateway
   }
 }
 
-async function callGemini(prompt: string, systemPrompt: string): Promise<GatewayResponse> {
-  const client    = getGeminiClient()
-  const model     = process.env.GEMINI_MODEL || 'gemini-2.5-flash'
-  const temperature = parseFloat(process.env.GEMINI_TEMPERATURE || '0.8')
-  const maxOutputTokens = parseInt(process.env.GEMINI_MAX_OUTPUT_TOKENS || '2000', 10)
-  const t0        = Date.now()
-
-  const response = await client.models.generateContent({
-    model,
-    contents: prompt,
-    config: {
-      systemInstruction: systemPrompt,
-      temperature,
-      maxOutputTokens,
-    },
-  })
-  const text = response.text ?? ''
-  const promptTokens = response.usageMetadata?.promptTokenCount ?? estimateTokens(systemPrompt + prompt)
-  const completionTokens = response.usageMetadata?.candidatesTokenCount ?? estimateTokens(text)
-  const totalTokens = response.usageMetadata?.totalTokenCount ?? (promptTokens + completionTokens)
-
-  return {
-    text,
-    provider: 'Gemini',
-    model,
-    latencyMs: Date.now() - t0,
-    usage: { promptTokens, completionTokens, totalTokens },
-    cacheHit: false,
-    retries: 0,
-    fallbackUsed: false,
-    estimatedCostUsd: estimateCost(model, promptTokens, completionTokens),
-  }
-}
-
 async function callOpenRouter(prompt: string, systemPrompt: string): Promise<GatewayResponse> {
   const client    = getOpenRouterClient()
-  const model     = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-flash'
+  const model     = process.env.OPENROUTER_MODEL || 'anthropic/claude-3.5-sonnet'
   const temp      = parseFloat(process.env.OPENROUTER_TEMPERATURE || '0.8')
   const maxTokens = parseInt(process.env.OPENROUTER_MAX_TOKENS   || '2000', 10)
   const t0        = Date.now()
@@ -501,7 +495,7 @@ async function executeWithRetry(
 
     try {
       let resp: GatewayResponse
-      if (name === 'Gemini')       resp = await withTimeout(callGemini(prompt, systemPrompt), CALL_TIMEOUT)
+      if (name === 'Gemini')     resp = await withTimeout(callGemini(prompt, systemPrompt), CALL_TIMEOUT)
       else if (name === 'OpenRouter') resp = await withTimeout(callOpenRouter(prompt, systemPrompt), CALL_TIMEOUT)
       else if (name === 'OpenAI')   resp = await withTimeout(callOpenAI(prompt, systemPrompt),   CALL_TIMEOUT)
       else if (name === 'VertexAI') resp = await withTimeout(callVertexAI(prompt, systemPrompt), CALL_TIMEOUT)
@@ -515,7 +509,7 @@ async function executeWithRetry(
       markFailure(name, isTimeout)
       lastErr = err instanceof Error ? err : new Error(String(err))
 
-      if (!isHealthy(name) || !isRetryableProviderError(err)) break
+      if (!isHealthy(name)) break   // unhealthy — stop retrying this provider
     }
   }
 
@@ -619,7 +613,7 @@ export const gateway = {
 
 // ─── Current active provider label (for startup logs / metrics) ───────────────
 export function getActiveProviderLabel(): string {
-  if (process.env.GEMINI_API_KEY)                                            return 'Gemini'
+  if (process.env.GEMINI_API_KEY)                                               return 'Gemini'
   if (process.env.OPENROUTER_API_KEY)                                            return 'OpenRouter'
   if (process.env.OPENAI_API_KEY)                                                return 'OpenAI'
   if (process.env.GOOGLE_CLOUD_PROJECT || process.env.VERTEX_PROJECT_ID)        return 'VertexAI'

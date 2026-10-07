@@ -16,8 +16,6 @@
  *  - Startup environment validation log
  */
 
-import 'dotenv/config'
-
 import https  from 'https'
 import http   from 'http'
 import fs     from 'fs'
@@ -266,7 +264,7 @@ app.post('/llm', llmLimiter, async (req: Request, res: Response) => {
 function buildCtx(extra: Record<string, unknown> = {}) {
   const hasGemini = !!process.env.GEMINI_API_KEY
   const hasOAI = !!process.env.OPENAI_API_KEY
-  const hasVtx = !!process.env.GOOGLE_CLOUD_PROJECT
+  const hasVtx = !!(process.env.GOOGLE_CLOUD_PROJECT || process.env.VERTEX_PROJECT_ID)
   return {
     domain:         'general',
     problem:        'creative challenge',
@@ -394,11 +392,12 @@ function logStartupConfig(): void {
   const hasGemini = !!process.env.GEMINI_API_KEY
   const hasOR  = !!process.env.OPENROUTER_API_KEY
   const hasOAI = !!process.env.OPENAI_API_KEY
-  const hasVtx = !!process.env.GOOGLE_CLOUD_PROJECT
+  const hasVtx = !!(process.env.GOOGLE_CLOUD_PROJECT || process.env.VERTEX_PROJECT_ID)
   log('info', 'startup config', {
     port:        PORT,
     bind:        '127.0.0.1',
     provider:    hasGemini ? 'Gemini' : hasOR ? 'OpenRouter' : hasOAI ? 'OpenAI' : hasVtx ? 'VertexAI' : 'Mock (no AI keys set)',
+    priority:    'Gemini → OpenRouter → OpenAI → VertexAI → Mock',
     gemini:      hasGemini ? 'configured' : 'GEMINI_API_KEY not set',
     openrouter:  hasOR ? 'configured' : 'OPENROUTER_API_KEY not set',
     openai:      hasOAI ? 'configured' : 'OPENAI_API_KEY not set',
